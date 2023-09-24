@@ -188,10 +188,10 @@ int main(int argc, char* argv[])
 	unsigned char header_name_chars[MAX_HEADER_NAME_LENGTH + 1] = { 0 };
 	printf("Info: Current position: %d\n", line_start_offsets[header_count - 1]);
 	printf("Info: Indexing byte offsets of header lines...\n  ");
-	for (header_count = 0, position = 0; position < headers_last_byte; position++)
+	for (header_count = 0, position = 0; position < headers_last_byte; position += line_ending_length)
 	{
 		//printf("Current position pointer: %p\n", &file_in_memory[position]);
-		//printf("i = %d, position = %d\n", i, position);
+		//printf("header_count = %d, position = %d\n", header_count, position);
 		next_line_ending = memmem(&file_in_memory[position], headers_last_byte - position, line_ending, line_ending_length);
 		//printf("next_line_ending: %p\n", &next_line_ending);
 		if (valid_header_character(file_in_memory[position])) {
