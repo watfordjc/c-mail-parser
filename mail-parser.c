@@ -690,27 +690,83 @@ int main(int argc, char* argv[])
 //		     }
 		}
 		int is_base64 = 0;
+		int is_quoted_printable = 0;
 		printf("    Content-Transfer-Encoding = '%s'\n", field_body_chars);
-		if (field_body_length == 7 && strncmp("base64", field_body_chars, 6) == 0) {
-			int is_base64 = 1;
+		int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
+		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
+		unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
+		int raw_encoded_length = 0;
+		int pos = 0;
+		if (field_body_length == 17 && strncmp("quoted-printable", field_body_chars, 16) == 0) {
+			is_quoted_printable = 1;
+			printf("  Content-Transfer-Encoding validated as quoted-printable.\n");
+			unsigned char soft_line_ending[line_ending_length + 2];
+			soft_line_ending[0] = '=';
+			memcpy(&soft_line_ending[1], line_ending, line_ending_length);
+			for (raw_encoded_length = 0, pos = 0; pos < content_length; pos++) {
+				unsigned char c = first_byte[pos];
+				if (c != '=') {
+					memcpy(&encoded_bytes[raw_encoded_length], first_byte + pos, 1);
+					raw_encoded_length++;
+				} else if (strncmp(soft_line_ending, &first_byte[pos], line_ending_length + 1) == 0) {
+					pos += line_ending_length;
+				} else {
+					unsigned char encoded_char[3] = { first_byte[pos+1], first_byte[pos+2], '\0' };
+					int decoded_char_numeric = (int)strtol(encoded_char, NULL, 16);
+					unsigned char decoded_char;
+					sprintf(&decoded_char, "%c", decoded_char_numeric);
+					memcpy(&encoded_bytes[raw_encoded_length], &decoded_char, 1);
+					raw_encoded_length++;
+					pos += 2;
+				}
+//				if (c != '\n' && c != '\r') {
+//					memcpy(&encoded_bytes[raw_encoded_length], first_byte + pos, 1);
+//					raw_encoded_length++;
+//				}
+			}
+			printf("    Detected Content-Length: %d bytes\n", content_length);
+			printf("    Decoded content length: %d bytes\n", raw_encoded_length);
+				unsigned char* sha1_digest = sha1_hash(encoded_bytes, raw_encoded_length);
+				printf("    SHA-1 Hash: %s\n", sha1_digest);
+				// Try to open the file
+				errno = 0;
+				unsigned char output_path[2048];
+				sprintf(output_path, "/tmp/%s", sha1_digest);
+				free(sha1_digest);
+				FILE *fd_decoded = fopen(output_path, "w");
+				if (fd_decoded == NULL) {
+					perror("open() error: ");
+				} else {
+					size_t bytes_written = fwrite(encoded_bytes, 1, raw_encoded_length, fd_decoded);
+					if (bytes_written != raw_encoded_length) {
+						fprintf(stderr, "File write byte length mismatch: %d written, %d expected\n", bytes_written, raw_encoded_length);
+					} else {
+						printf("  Extracted file to %s\n", output_path);
+					}
+					fclose(fd_decoded);
+				}
+
+			free(encoded_bytes);
+		} else if (field_body_length == 7 && strncmp("base64", field_body_chars, 6) == 0) {
+			is_base64 = 1;
 			printf("  Content-Transfer-Encoding validated as base64.\n");
 			printf("  Extracting binary file...\n");
 			printf("    current_part = %d, boundary_count = %d, next_offset = %p, termination = %p, double_line_ending = %p\n", current_part, boundary_count, &file_in_memory[boundary_offsets[current_part + 1]], &file_in_memory[boundary_terminator], double_line_ending);
-			int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
-			unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
-			unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
-			int raw_base64_length = 0;
-			int pos = 0;
-			for (raw_base64_length = 0, pos = 0; pos < content_length; pos++) {
+//			int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
+//			unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
+//			unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
+//			int raw_base64_length = 0;
+//			int pos = 0;
+			for (raw_encoded_length = 0, pos = 0; pos < content_length; pos++) {
 				unsigned char c = first_byte[pos];
 				if (c != '\n' && c != '\r') {
-					memcpy(&encoded_bytes[raw_base64_length], first_byte + pos, 1);
-					raw_base64_length++;
+					memcpy(&encoded_bytes[raw_encoded_length], first_byte + pos, 1);
+					raw_encoded_length++;
 				}
 			}
-			printf("    Detected Content-Length: %d bytes (%d bytes without newlines)\n", content_length, raw_base64_length);
+			printf("    Detected Content-Length: %d bytes (%d bytes without line endings)\n", content_length, raw_encoded_length);
 			int *output_length = calloc(1, sizeof(int));
-			unsigned char* decoded_bytes = base64_decode(encoded_bytes, raw_base64_length, output_length);
+			unsigned char* decoded_bytes = base64_decode(encoded_bytes, raw_encoded_length, output_length);
 			if (decoded_bytes != NULL) {
 				printf("    Decoded content length: %d bytes\n", *output_length);
 				unsigned char* sha1_digest = sha1_hash(decoded_bytes, *output_length);
