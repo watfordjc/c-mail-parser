@@ -50,6 +50,59 @@ int get_header_name_length(unsigned char* header, size_t len)
 	}
 }
 
+void unfold_field_body(unsigned char* field_body, size_t field_body_length, unsigned char* unfolded_field_body_chars, size_t* unfolded_field_body_length)
+{
+	bzero(unfolded_field_body_chars, MAX_HEADER_BODY_LENGTH + 1 * sizeof(char));
+	*unfolded_field_body_length = 0;
+	int inside_quote = 0;
+	int folded_position = 0;
+	int unfolded_position = 0;
+	unsigned char c = '\0';
+	for (folded_position = 0, unfolded_position = 0; folded_position < field_body_length; folded_position++)
+	{
+		c = field_body[folded_position];
+		//printf("%d = %d (%c)\n", i, c, c);
+		if (c != '\r' && c != '\n' && c > 32 && c < 127) {
+			memcpy(&unfolded_field_body_chars[unfolded_position], &field_body[folded_position], 1);
+			if (c == '"') {
+				inside_quote ^= 1;
+				printf("    Inside Quoted-String: %s\n", inside_quote == 1 ? "true" : "false");
+			}
+			unfolded_position++;
+		} else if (inside_quote == 1 && (c == 32 || c == '\t')) {
+			memcpy(&unfolded_field_body_chars[unfolded_position], &field_body[folded_position], 1);
+			unfolded_position++;
+		}
+	}
+	*unfolded_field_body_length = unfolded_position;
+	return;
+}
+
+void unfold_mime_version_field_body(unsigned char* field_body, size_t field_body_length, unsigned char* unfolded_field_body_chars, size_t* unfolded_field_body_length)
+{
+	bzero(unfolded_field_body_chars, MAX_HEADER_BODY_LENGTH + 1 * sizeof(char));
+	*unfolded_field_body_length = 0;
+	int folded_position = 0;
+	int unfolded_position = 0;
+	unsigned char c = '\0';
+	for (folded_position = 0, unfolded_position = 0; folded_position < field_body_length; folded_position++)
+	{
+		c = field_body[folded_position];
+		//printf("%d = %d (%c)\n", i, c, c);
+		if (c > 47 && c < 58 || c == 46) {
+			memcpy(&unfolded_field_body_chars[unfolded_position], &field_body[folded_position], 1);
+			unfolded_position++;
+		}
+	}
+	*unfolded_field_body_length = unfolded_position;
+	return;
+}
+
+void parse_content_type_header(unsigned char* header, size_t len)
+{
+	return;
+}
+
 unsigned char* base64_decode(const char *encoded_bytes, int length, int* output_length) {
 	//printf("Next 80 characters: %.*s\n", 80, &encoded_bytes[0]);
 	const int predicted_length = 3 * length / 4;
@@ -123,8 +176,10 @@ int main(int argc, char* argv[])
 	printf("\n");
 
 	/* TODO: Parsing needs to be recursive so that e-mails within e-mails are parsed properly */
+	/* This is probably the start of where an RFC.822 message should be parsed */
+	/* TODO: Deal with MIME part recursion first, to work out what needs passing/returning from MIME type functions */
 
-	char line_ending[MAX_LINE_ENDING_LENGTH + 1];
+	unsigned char line_ending[MAX_LINE_ENDING_LENGTH + 1];
 	int line_ending_length = 0;
 	int message_body_found = 0;
 
@@ -168,7 +223,6 @@ int main(int argc, char* argv[])
 		printf("Info: LF line endings detected\n");
 	} else {
 		fprintf(stderr, "Warning: Cannot detect any line endings\n");
-		//free(line_ending);
 		exit(1);
 	}
 	line_ending_length = strlen(line_ending);
@@ -252,6 +306,7 @@ int main(int argc, char* argv[])
 		header_name_chars[header_name_len + 1] = '\0';
 		//printf("%s\n", header_name_chars);
 
+		/* TODO: Check if MAX_IDENTICAL_HEADER_COUNT will be exceeded, and warn when ignoring a header due to array size limit */
 		if (strcasecmp("return-path:", header_name_chars) == 0) {
 			header_return_path[header_return_path_count] = i;
 			header_return_path_count++;
@@ -305,11 +360,15 @@ int main(int argc, char* argv[])
 	printf("  MIME-Version: header MUST occur 1 time if a MIME message (RFC 2045): %s\n", header_mime_version_count == 1 ? "✅ pass (MIME message)" : "❌ fail (might not be a MIME message)");
 	printf("  Content-Type: header should occur 0-1 times (RFC 2045): %s\n", header_content_type_count <= 1 ? "✅ pass" : "❌ fail");
 
+	/* TODO: If there are DKIM-Signature headers, integrity check the message using parameters a,c,b */
+	/* TODO: If used to parse all incoming email (e.g. sieve script), consider storing DKIM selectors, public keys, and related DNS/DNSSEC records */
+
 	int line_start_offset = -1;
 	int line_length = -1;
 	int field_body_offset = -1;
-	char field_body_chars[MAX_HEADER_BODY_LENGTH + 1];
 	int field_body_length = -1;
+	unsigned char unfolded_field_body_chars[MAX_HEADER_BODY_LENGTH + 1 * sizeof(char)];
+	int unfolded_field_body_length = 0;
 	int is_mime_v1 = -1;
 	if (header_mime_version_count == 1) {
 		int header_index = header_mime_version[0];
@@ -328,18 +387,12 @@ int main(int argc, char* argv[])
 		//printf("  field-body offset: %d bytes\n", field_body_offset);
 		field_body_length = line_length - header_name_lengths[header_index];
 		//printf("  field-body length: %d bytes\n", field_body_length);
+
 		printf("  Parsing field-body...\n");
-		for (int i = 0, pos = 0; pos < field_body_length; pos++)
-		{
-			unsigned char c = file_in_memory[field_body_offset + pos];
-			//printf("%d = %d (%c)\n", i, c, c);
-			if (c > 47 && c < 58 || c == 46) {
-				memcpy(&field_body_chars[i], &file_in_memory[field_body_offset + pos], 1);
-				i++;
-			}
-		}
-		printf("    MIME-Version = '%s'\n", field_body_chars);
-		if (strncmp("1.0", field_body_chars, 3) == 0) {
+		unfold_mime_version_field_body(&file_in_memory[field_body_offset], field_body_length, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+
+		printf("    MIME-Version = '%s'\n", unfolded_field_body_chars);
+		if (strncmp("1.0", unfolded_field_body_chars, 3) == 0) {
 			is_mime_v1 = 1;
 			printf("  MIME-Version field-body validated.\n");
 		}
@@ -363,78 +416,62 @@ int main(int argc, char* argv[])
 		//printf("  field-body offset: %d bytes\n", field_body_offset);
 		field_body_length = line_length - header_name_lengths[header_index];
 		//printf("  field-body length: %d bytes\n", field_body_length);
-		int inside_quote = 0;
+
 		printf("  Parsing field-body...\n");
-		for (int i = 0, pos = 0; pos < field_body_length; pos++)
-		{
-			unsigned char c = file_in_memory[field_body_offset + pos];
-			//printf("%d = %d (%c)\n", i, c, c);
-			if (c != '\r' && c != '\n' && c > 32 && c < 127) {
-				memcpy(&field_body_chars[i], &file_in_memory[field_body_offset + pos], 1);
-				if (c == '"') {
-					inside_quote ^= 1;
-					printf("    Inside Quoted-String: %s\n", inside_quote == 1 ? "true" : "false");
-				}
-				i++;
-			} else if (inside_quote == 1 && (c == 32 || c == '\t')) {
-				memcpy(&field_body_chars[i], &file_in_memory[field_body_offset + pos], 1);
-				i++;
-			}
-		}
-		printf("    Content-Type = '%s'\n", field_body_chars);
-		int field_body_unfolded_length = strlen(field_body_chars);
-		printf("      Unfolded body length: %d\n", field_body_unfolded_length);
+		unfold_field_body(&file_in_memory[field_body_offset], field_body_length, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+
+		printf("    Content-Type = '%s'\n", unfolded_field_body_chars);
+		printf("      Unfolded body length: %d\n", unfolded_field_body_length);
 		unsigned int semicolon_offsets[MAX_IDENTICAL_HEADER_COUNT] = { 0 };
 		int semicolon_count = 0;
-		char* next_quote = NULL;
-		char* next_semicolon = NULL;
-		inside_quote = 0;
-		for (int i = 0; i < field_body_unfolded_length; i++) {
-			printf("      Current position: %p\n", field_body_chars + i);
+		unsigned char* next_quote = NULL;
+		unsigned char* next_semicolon = NULL;
+		for (int i = 0; i < unfolded_field_body_length; i++) {
+			printf("      Current position: %p\n", unfolded_field_body_chars + i);
 			// memmem(&file_in_memory[position], sb.st_size - position, "\r", 1);
-			next_quote = memmem(&field_body_chars[i], field_body_unfolded_length - i, "\"", 1);
-			next_semicolon = memmem(&field_body_chars[i], field_body_unfolded_length - i, ";", 1);
+			next_quote = memmem(&unfolded_field_body_chars[i], unfolded_field_body_length - i, "\"", 1);
+			next_semicolon = memmem(&unfolded_field_body_chars[i], unfolded_field_body_length - i, ";", 1);
 			if (next_quote != NULL && next_semicolon != NULL && next_quote < next_semicolon) {
-				printf("    Double-quote found at: %p (offset %d), skipping over\n", next_quote, (int)(next_quote - field_body_chars));
-				next_quote = memmem(&next_quote[1], field_body_unfolded_length - (int)(next_quote - field_body_chars) , "\"", 1);
+				printf("    Double-quote found at: %p (offset %d), skipping over\n", next_quote, (int)(next_quote - unfolded_field_body_chars));
+				next_quote = memmem(&next_quote[1], unfolded_field_body_length - (int)(next_quote - unfolded_field_body_chars) , "\"", 1);
 				if (next_quote != NULL) {
-					printf("    Double-quote found at: %p (offset %d)\n", next_quote, (int)(next_quote - field_body_chars));
-					i = (int)(next_quote - field_body_chars);
+					printf("    Double-quote found at: %p (offset %d)\n", next_quote, (int)(next_quote - unfolded_field_body_chars));
+					i = (int)(next_quote - unfolded_field_body_chars);
 					continue;
 				} else {
 					printf("    Warning: Unmatched double-quote detected, reversing to offset %d\n", i);
 				}
 			}
 			if (next_semicolon != NULL) {
-				printf("        Semi-colon found at: %p (offset %d)\n", next_semicolon, (int)(next_semicolon - field_body_chars));
-				semicolon_offsets[semicolon_count] = (int)(next_semicolon - field_body_chars);
+				printf("        Semi-colon found at: %p (offset %d)\n", next_semicolon, (int)(next_semicolon - unfolded_field_body_chars));
+				semicolon_offsets[semicolon_count] = (int)(next_semicolon - unfolded_field_body_chars);
 				semicolon_count++;
-				i = (int)(next_semicolon - field_body_chars);
+				i = (int)(next_semicolon - unfolded_field_body_chars);
 			} else {
 				break;
 			}
 		}
 		printf("    Number of parameters: %d\n", semicolon_count);
 
-		int mime_type_len = semicolon_count > 0 ? semicolon_offsets[0] : field_body_unfolded_length;
+		int mime_type_len = semicolon_count > 0 ? semicolon_offsets[0] : unfolded_field_body_length;
 		unsigned char* mime_type = calloc(mime_type_len, sizeof(char));
 		unsigned char* mime_subtype = calloc(mime_type_len, sizeof(char));
 		if (mime_type_len > 0)
 		{
 			printf("    Parsing MIME type and subtype...\n");
-			char* next_slash = memmem(&field_body_chars[0], mime_type_len, "/", 1);
+			unsigned char* next_slash = memmem(&unfolded_field_body_chars[0], mime_type_len, "/", 1);
 			if (next_slash != NULL) {
-				memcpy(mime_type, field_body_chars, (int)(next_slash - field_body_chars));
+				memcpy(mime_type, unfolded_field_body_chars, (int)(next_slash - unfolded_field_body_chars));
 				printf("      MIME type: %s\n", mime_type);
 			} else {
-				memcpy(mime_type, field_body_chars, mime_type_len);
+				memcpy(mime_type, unfolded_field_body_chars, mime_type_len);
 				printf("      MIME type: %s\n", mime_type);
 			}
 			if (semicolon_count > 0) {
-				memcpy(mime_subtype, &next_slash[1], semicolon_offsets[0] - 1 - (int)(next_slash - field_body_chars));
+				memcpy(mime_subtype, &next_slash[1], semicolon_offsets[0] - 1 - (int)(next_slash - unfolded_field_body_chars));
 				printf("      MIME subtype: %s\n", mime_subtype);
 			} else {
-				memcpy(mime_subtype, &next_slash[1], mime_type_len - 1 - (int)(next_slash - field_body_chars));
+				memcpy(mime_subtype, &next_slash[1], mime_type_len - 1 - (int)(next_slash - unfolded_field_body_chars));
 				printf("      MIME subtype: %s\n", mime_subtype);
 			}
 		}
@@ -442,19 +479,19 @@ int main(int argc, char* argv[])
 		printf("    Indexing parameters... NOT FULLY IMPLEMENTED\n");
 
 		int mime_parameter_len = 0;
-		unsigned char* mime_param_name = calloc(field_body_unfolded_length + 1, sizeof(char));
-		unsigned char* mime_param_value = calloc(field_body_unfolded_length + 1, sizeof(char));
+		unsigned char* mime_param_name = calloc(unfolded_field_body_length + 1, sizeof(char));
+		unsigned char* mime_param_value = calloc(unfolded_field_body_length + 1, sizeof(char));
 		unsigned char* mime_boundary_delimiter = calloc(1000, sizeof(char));
 		unsigned char* mime_charset = calloc(1000, sizeof(char));
 		for (int i = 0; i < semicolon_count; i++)
 		{
-			mime_parameter_len = i + 1 < semicolon_count ? semicolon_offsets[i + 1] - semicolon_offsets[i] - 1 : field_body_unfolded_length - semicolon_offsets[i] - 1;
+			mime_parameter_len = i + 1 < semicolon_count ? semicolon_offsets[i + 1] - semicolon_offsets[i] - 1 : unfolded_field_body_length - semicolon_offsets[i] - 1;
 			printf("      Parameter length: %d\n", mime_parameter_len);
-			char* next_equals = memmem(&field_body_chars[semicolon_offsets[i] + 1], mime_parameter_len, "=", 1);
-			printf ("        Equals found at %p (offset %d)\n", next_equals, (int)(next_equals - field_body_chars) - semicolon_offsets[i]);
+			unsigned char* next_equals = memmem(&unfolded_field_body_chars[semicolon_offsets[i] + 1], mime_parameter_len, "=", 1);
+			printf ("        Equals found at %p (offset %d)\n", next_equals, (int)(next_equals - unfolded_field_body_chars) - semicolon_offsets[i]);
 			if (next_equals != NULL) {
-				size_t mime_param_name_len = (int)(next_equals - field_body_chars) - semicolon_offsets[i] - 1;
-				memcpy(mime_param_name, &field_body_chars[semicolon_offsets[i] + 1], mime_param_name_len);
+				size_t mime_param_name_len = (int)(next_equals - unfolded_field_body_chars) - semicolon_offsets[i] - 1;
+				memcpy(mime_param_name, &unfolded_field_body_chars[semicolon_offsets[i] + 1], mime_param_name_len);
 				printf("        Param name = '%s'\n", mime_param_name);
 				size_t mime_param_value_len = mime_parameter_len - mime_param_name_len - 1;
 				if (next_equals[1] == '"' && next_equals[mime_param_value_len] == '"') {
@@ -540,8 +577,11 @@ int main(int argc, char* argv[])
 				int current_line_length = 0;
 				for (boundary_count = 0, position = body_start; position < sb.st_size; position++)
 				{
+					/* Search for the next line separator (which all boundary delimiters start with) - faster than searching for next delimiter */
 					next_line_separator = memmem(&file_in_memory[position], sb.st_size - position, line_ending, line_ending_length);
+					/* If there are more line separators, there might be more boundary delimiters */
 					if (next_line_separator != NULL) {
+						/* Calculate the length of the current line */
 						current_line_length = (int)(next_line_separator - file_in_memory - position);
 /*
 						if (current_line_length != 76) {
@@ -550,6 +590,8 @@ int main(int argc, char* argv[])
 							printf (".");
 						}
 */
+						/* Comparing strings is slow - skip comparison if line length doesn't match length of delimiter or terminator */
+						/* TODO: Line length comparison is strict. Is it safe to assume all MUAs always immediately follow a delimiter with CRLF? */
 						if (current_line_length == boundary_delim_chars_len) {
 //						     printf("\nLine length matches boundary delim length at position %d\n", position);
 //						     printf("%.*s\n", current_line_length, boundary_delim_chars);
@@ -652,7 +694,6 @@ int main(int argc, char* argv[])
 					}
 	if (part_header_content_transfer_encoding_count == 1) {
 		int header_index = part_header_content_transfer_encoding[0];
-		bzero(field_body_chars, (MAX_HEADER_BODY_LENGTH + 1) * sizeof(char));
 		printf("\nValidating Content-Transfer-Encoding header (does not support comments)...\n");
 		line_start_offset = line_start_offsets[header_index];
 		line_length = -1;
@@ -668,36 +709,20 @@ int main(int argc, char* argv[])
 		//printf("  field-body offset: %d bytes\n", field_body_offset);
 		field_body_length = line_length - header_name_lengths[header_index];
 		//printf("  field-body length: %d bytes\n", field_body_length);
+
 		printf("  Parsing field-body...\n");
-		for (int i = 0, pos = 0; pos < field_body_length; pos++)
-		{
-			unsigned char c = file_in_memory[field_body_offset + pos];
-			//printf("%d = %d (%c)\n", i, c, c);
-			if (c != '\r' && c != '\n' && c > 32 && c < 127) {
-				memcpy(&field_body_chars[i], &file_in_memory[field_body_offset + pos], 1);
-				if (c == '"') {
-					inside_quote ^= 1;
-					printf("    Inside Quoted-String: %s\n", inside_quote == 1 ? "true" : "false");
-				}
-				i++;
-			} else if (inside_quote == 1 && (c == 32 || c == '\t')) {
-				memcpy(&field_body_chars[i], &file_in_memory[field_body_offset + pos], 1);
-				i++;
-			}
-//		     if (c > 47 && c < 58 || c == 46) {
-//			     memcpy(&field_body_chars[i], &file_in_memory[field_body_offset + pos], 1);
-//			     i++;
-//		     }
-		}
+		unfold_field_body(&file_in_memory[field_body_offset], field_body_length, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+
 		int is_base64 = 0;
 		int is_quoted_printable = 0;
-		printf("    Content-Transfer-Encoding = '%s'\n", field_body_chars);
+		printf("    Content-Transfer-Encoding = '%s'\n", unfolded_field_body_chars);
+		printf("      unfolded_field_body_length: %d\n", unfolded_field_body_length);
 		int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
 		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
 		unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
 		int raw_encoded_length = 0;
 		int pos = 0;
-		if (field_body_length == 17 && strncmp("quoted-printable", field_body_chars, 16) == 0) {
+		if (unfolded_field_body_length == 16 && strncmp("quoted-printable", unfolded_field_body_chars, 16) == 0) {
 			is_quoted_printable = 1;
 			printf("  Content-Transfer-Encoding validated as quoted-printable.\n");
 			unsigned char soft_line_ending[line_ending_length + 2];
@@ -747,7 +772,7 @@ int main(int argc, char* argv[])
 				}
 
 			free(encoded_bytes);
-		} else if (field_body_length == 7 && strncmp("base64", field_body_chars, 6) == 0) {
+		} else if (unfolded_field_body_length == 6 && strncmp("base64", unfolded_field_body_chars, 6) == 0) {
 			is_base64 = 1;
 			printf("  Content-Transfer-Encoding validated as base64.\n");
 			printf("  Extracting binary file...\n");
@@ -855,7 +880,6 @@ int main(int argc, char* argv[])
 // TODO: Sanity check the number of content-type headers, and warn if there is a potential issue
 // TODO: Do the RFCs say how differing headers with the same field-name should be treated?
 // TODO: Do the RFCs say a field-name should be followed by : and SP? strlen(": ") is the '+ 2' at end of offset calculation
-
 
 	// if (mime_version_header_count == 0) {
 	//      printf("Info: No MIME-Version header.\n");
