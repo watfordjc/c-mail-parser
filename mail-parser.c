@@ -98,38 +98,187 @@ void unfold_mime_version_field_body(unsigned char* field_body, size_t field_body
 	return;
 }
 
-void parse_content_type_header(unsigned char* header, size_t len)
+void parse_header(unsigned char *file_in_memory, int *line_start_offsets, int *header_name_lengths, int line_ending_length, int header_count, int body_start, int header_index, unsigned char* unfolded_field_body_chars, size_t* unfolded_field_body_length)
 {
+//		printf("\n");
+//		printf("file_in_memory = %p, line_start_offsets = %p, header_name_lengths = %p, line_ending_lengths = %p, header_count = %d, body_start = %d, header_index = %d, unfolded_field_body_chars = %p, unfolded_field_body_length = %d\n", file_in_memory, line_start_offsets, header_name_lengths, line_ending_length, header_count, body_start, header_index, unfolded_field_body_chars, *unfolded_field_body_length);
+
+		unsigned char header_name[MAX_HEADER_NAME_LENGTH + 1] = { 0 };
+		int header_name_len = 0;
+		unsigned char log_message[4095] = { 0 };
+		unsigned char log_message_tmp[4095] = { 0 };
+
+		int line_start_offset = line_start_offsets[header_index];
+		header_name_len = get_header_name_length(&file_in_memory[line_start_offset], header_name_lengths[header_index]);
+		memcpy(header_name, &file_in_memory[line_start_offset], header_name_len);
+		header_name[header_name_len + 0] = ':';
+		header_name[header_name_len + 1] = '\0';
+
+		sprintf(log_message_tmp, "Unfolding header[%d] ('%s')...", header_index, header_name);
+		strcpy(log_message, log_message_tmp);
+		int line_length = -1;
+		if (header_index + 1 < header_count) {
+			// If there are subsequent headers, use the start of the next header and the start of this header to calculate line length
+			line_length = line_start_offsets[header_index + 1] - line_start_offset - line_ending_length;
+		} else if (body_start > 0) {
+			// If this is the last header and there is a message body, use the start of message body and the start of this header to calculate line  length
+			line_length = body_start - line_start_offset - line_ending_length - line_ending_length;
+		}
+		sprintf(log_message_tmp, " line_length=%d", line_length);
+		strcat(log_message, log_message_tmp);
+
+		int field_body_offset = line_start_offset + header_name_lengths[header_index];
+		sprintf(log_message_tmp, ", field_body_offset=%d", field_body_offset);
+		strcat(log_message, log_message_tmp);
+
+		int field_body_length = line_length - header_name_lengths[header_index];
+		sprintf(log_message_tmp, ", field_body_length=%d", field_body_length);
+		strcat(log_message, log_message_tmp);
+
+		if (strcasecmp("mime-version:", header_name) == 0) {
+			unfold_mime_version_field_body(&file_in_memory[field_body_offset], field_body_length, unfolded_field_body_chars, unfolded_field_body_length);
+		} else {
+			unfold_field_body(&file_in_memory[field_body_offset], field_body_length, unfolded_field_body_chars, unfolded_field_body_length);
+		}
+		sprintf(log_message_tmp, ", unfolded_field_body_length=%d", *unfolded_field_body_length);
+		strcat(log_message, log_message_tmp);
+
+		printf("%s... done\n", log_message);
+
 	return;
 }
 
-unsigned char* base64_decode(const char *encoded_bytes, int length, int* output_length) {
-	//printf("Next 80 characters: %.*s\n", 80, &encoded_bytes[0]);
-	const int predicted_length = 3 * length / 4;
-//	printf("Predicted length: %d bytes\n", predicted_length);
+unsigned char* base64_decode(const char *raw_encoded_bytes, int raw_encoded_length, int* decoded_length) {
+	unsigned char* encoded_bytes = calloc(raw_encoded_length, 1);
+	int encoded_length = 0;
+	int pos = 0;
+	unsigned char c = '\0';
 
+	for (pos = 0; pos < raw_encoded_length; pos++) {
+		c = raw_encoded_bytes[pos];
+		if (c != '\n' && c != '\r') {
+			memcpy(&encoded_bytes[encoded_length], &c, 1);
+			encoded_length++;
+		}
+	}
+	printf("    Detected Content-Length: %d bytes (%d bytes without line endings)\n", raw_encoded_length, encoded_length);
+
+	const int predicted_length = 3 * encoded_length / 4;
 	unsigned char* decoded_bytes = calloc(predicted_length + 1, 1);
-	*output_length = EVP_DecodeBlock(decoded_bytes, encoded_bytes, length);
-//	printf("Output length: %d bytes\n", *output_length);
-	if (predicted_length != *output_length) {
-		fprintf(stderr, "Length mismatch: predicted %d bytes but output is %d bytes\n", predicted_length, output_length);
+
+	*decoded_length = EVP_DecodeBlock(decoded_bytes, encoded_bytes, encoded_length);
+	if (predicted_length != *decoded_length) {
+		fprintf(stderr, "Length mismatch: predicted %d bytes but output is %d bytes\n", predicted_length, *decoded_length);
 	}
 
+	free(encoded_bytes);
+	return decoded_bytes;
+}
+
+unsigned char* quoted_printable_decode(const char *raw_encoded_bytes, int raw_encoded_length, unsigned char* line_ending, int line_ending_length, int* decoded_length) {
+	unsigned char* decoded_bytes = calloc(raw_encoded_length, 1);
+	*decoded_length = 0;
+	int pos = 0;
+
+	unsigned char soft_line_ending[line_ending_length + 2];
+	soft_line_ending[0] = '=';
+	memcpy(&soft_line_ending[1], line_ending, line_ending_length);
+
+	unsigned char c = '\0';
+	unsigned char encoded_char[3] = { 0 };
+	int decoded_char_numeric = 0;
+	unsigned char decoded_char = '\0';
+
+	for (pos = 0; pos < raw_encoded_length; pos++) {
+		c = raw_encoded_bytes[pos];
+		if (c != '=') {
+			memcpy(&decoded_bytes[*decoded_length], &c, 1);
+			*decoded_length += 1;
+		} else if (strncmp(soft_line_ending, &raw_encoded_bytes[pos], line_ending_length + 1) == 0) {
+			pos += line_ending_length;
+		} else {
+			encoded_char[0] = raw_encoded_bytes[pos+1];
+			encoded_char[1] = raw_encoded_bytes[pos+2];
+			encoded_char[2] = '\0';
+			decoded_char_numeric = (int)strtol(encoded_char, NULL, 16);
+			sprintf(&decoded_char, "%c", decoded_char_numeric);
+			memcpy(&decoded_bytes[*decoded_length], &decoded_char, 1);
+			*decoded_length += 1;
+			pos += 2;
+		}
+	}
+	printf("    Detected Content-Length: %d bytes\n", raw_encoded_length);
 	return decoded_bytes;
 }
 
 unsigned char* sha1_hash(const char *data, int length) {
-	unsigned char digest_binary[21] = { 0 };// = calloc(20 + 1, sizeof(char));
+	unsigned char digest_binary[21] = { 0 };
 	unsigned char* digest_hex = calloc(40 + 1, sizeof(char));
-	unsigned char digest_hex_temp[3] = { 0 };// = calloc(3, sizeof(char));
+	unsigned char digest_hex_temp[3] = { 0 };
 
 	EVP_Digest(data, length, digest_binary, NULL, EVP_sha1(), NULL);
 	for (int i = 0; i < 20; i++) {
 		snprintf(digest_hex_temp, 3, "%02x", digest_binary[i]);
 		memcpy(&digest_hex[i*2], digest_hex_temp, 2);
 	}
-//     free(digest_binary);
+
 	return digest_hex;
+}
+
+void content_transfer_encoding_decode(unsigned char *first_byte, int content_length, unsigned char* line_ending, int line_ending_length, unsigned char *content_transfer_encoding, int content_transfer_encoding_length)
+{
+	int is_base64 = 0;
+	int is_quoted_printable = 0;
+	printf("    Content-Transfer-Encoding = '%s'\n", content_transfer_encoding);
+	printf("      unfolded_field_body_length: %d\n", content_transfer_encoding_length);
+
+	unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
+	unsigned char* decoded_bytes = NULL;
+	int decoded_length = 0;
+	int pos = 0;
+	unsigned char* sha1_digest = NULL;
+
+	if (content_transfer_encoding_length == 16 && strncmp("quoted-printable", content_transfer_encoding, 16) == 0) {
+		is_quoted_printable = 1;
+		printf("  Content-Transfer-Encoding validated as quoted-printable.\n");
+		printf("  Extracting content...\n");
+
+		decoded_bytes = quoted_printable_decode(&first_byte[0], content_length, line_ending, line_ending_length, &decoded_length);
+	} else if (content_transfer_encoding_length == 6 && strncmp("base64", content_transfer_encoding, 6) == 0) {
+		is_base64 = 1;
+		printf("  Content-Transfer-Encoding validated as base64.\n");
+		printf("  Extracting content...\n");
+
+		decoded_bytes = base64_decode(&first_byte[0], content_length, &decoded_length);
+	}
+
+	if (decoded_bytes != NULL) {
+		printf("    Decoded content length: %d bytes\n", decoded_length);
+		sha1_digest = sha1_hash(decoded_bytes, decoded_length);
+		printf("    SHA-1 Hash: %s\n", sha1_digest);
+
+		// Try to open the file
+		errno = 0;
+		unsigned char output_path[2048];
+		sprintf(output_path, "/tmp/%s", sha1_digest);
+		free(sha1_digest);
+		FILE *fd_decoded_content = fopen(output_path, "w");
+		if (fd_decoded_content == NULL) {
+			perror("fopen() error: ");
+		} else {
+			size_t bytes_written = fwrite(decoded_bytes, 1, decoded_length, fd_decoded_content);
+			if (bytes_written != decoded_length) {
+				fprintf(stderr, "File write byte length mismatch: %d written, %d expected\n", bytes_written, decoded_length);
+			} else {
+				printf("  Extracted file to %s\n", output_path);
+			}
+			fclose(fd_decoded_content);
+		}
+		free(decoded_bytes);
+	} else {
+		fprintf(stderr, "Unable to decode content with encoding type of %s\n", content_transfer_encoding);
+	}
+	free(encoded_bytes);
 }
 
 /*
@@ -207,8 +356,8 @@ int main(int argc, char* argv[])
 	/* Store offset of next LF character, or -1 if none */
 	int next_lf_offset = next_lf == NULL ? -1 : (int)(next_lf - &file_in_memory[0]);
 
-	printf("Info: The next CR after byte %d is at position %d\n", position, next_cr == NULL ? -1 : next_cr_offset);
-	printf("Info: The next LF after byte %d is at position %d\n", position, next_lf == NULL ? -1 : next_lf_offset);
+	printf("Info: The next CR after byte %d is at position %d\n", position, next_cr_offset);
+	printf("Info: The next LF after byte %d is at position %d\n", position, next_lf_offset);
 
 	/* Attempt to detect line ending format */
 	if (next_lf_offset == next_cr_offset + 1) {
@@ -297,6 +446,9 @@ int main(int argc, char* argv[])
 	int header_mime_version_count = 0;
 	int header_content_type[MAX_IDENTICAL_HEADER_COUNT] = { 0 };
 	int header_content_type_count = 0;
+	int header_content_transfer_encoding[MAX_IDENTICAL_HEADER_COUNT] = { 0 };
+	int header_content_transfer_encoding_count = 0;
+
 	for (int i = 0; i < header_count; i++)
 	{
 		header_name_len = get_header_name_length(&file_in_memory[line_start_offsets[i]], header_name_lengths[i]);
@@ -343,6 +495,10 @@ int main(int argc, char* argv[])
 			header_content_type[header_content_type_count] = i;
 			header_content_type_count++;
 			printf("  'content-type' header at index %d\n", i);
+		} else if (strcasecmp("content-transfer-encoding:", header_name_chars) == 0) {
+			header_content_transfer_encoding[header_content_transfer_encoding_count] = i;
+			header_content_transfer_encoding_count++;
+			printf("  'content-type' header at index %d\n", i);
 		} else {
 			printf("  Unhandled header (%s) at index %d\n", header_name_chars, i);
 		}
@@ -370,55 +526,36 @@ int main(int argc, char* argv[])
 	unsigned char unfolded_field_body_chars[MAX_HEADER_BODY_LENGTH + 1 * sizeof(char)];
 	int unfolded_field_body_length = 0;
 	int is_mime_v1 = -1;
+
 	if (header_mime_version_count == 1) {
 		int header_index = header_mime_version[0];
 		printf("\nValidating MIME-Version header (does not support comments)...\n");
-		line_start_offset = line_start_offsets[header_index];
-		line_length = -1;
-		if (header_index + 1 < header_count) {
-			/* If there are subsequent headers, use the start of the next header and the start of this header to calculate line length */
-			line_length = line_start_offsets[header_index + 1] - line_start_offset - line_ending_length;
-		} else if (body_start > 0) {
-			/* If this is the last header and there is a message body, use the start of message body and the start of this header to calculate line length */
-			line_length = body_start - line_start_offset - line_ending_length - line_ending_length;
-		}
-		//printf("  Line length: %d bytes\n", line_length);
-		field_body_offset = line_start_offset + header_name_lengths[header_index];
-		//printf("  field-body offset: %d bytes\n", field_body_offset);
-		field_body_length = line_length - header_name_lengths[header_index];
-		//printf("  field-body length: %d bytes\n", field_body_length);
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
 
-		printf("  Parsing field-body...\n");
-		unfold_mime_version_field_body(&file_in_memory[field_body_offset], field_body_length, &unfolded_field_body_chars[0], &unfolded_field_body_length);
-
-		printf("    MIME-Version = '%s'\n", unfolded_field_body_chars);
+		printf("  MIME-Version = '%s'\n", unfolded_field_body_chars);
 		if (strncmp("1.0", unfolded_field_body_chars, 3) == 0) {
 			is_mime_v1 = 1;
 			printf("  MIME-Version field-body validated.\n");
 		}
 	}
 
+	if (header_content_transfer_encoding_count == 1) {
+		int header_index = header_content_transfer_encoding[0];
+		printf("\nValidating Content-Transfer-Encoding header (does not support comments)...\n");
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+
+		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
+		int content_length = sb.st_size - body_start;
+//		printf("content_length = %d\n", content_length);
+//		printf("field_body = %s\n", unfolded_field_body_chars);
+
+		content_transfer_encoding_decode(&first_byte[0], content_length, line_ending, line_ending_length, unfolded_field_body_chars, unfolded_field_body_length);
+	}
+
 	if (header_content_type_count == 1) {
 		int header_index = header_content_type[0];
 		printf("\nValidating Content-Type header (does not support comments)...\n");
-		line_start_offset = line_start_offsets[header_index];
-		//printf("  Line start byte offset: %d\n", line_start_offset);
-		line_length = -1;
-		if (header_index + 1 < header_count) {
-			// If there are subsequent headers, use the start of the next header and the start of this header to calculate line length
-			line_length = line_start_offsets[header_index + 1] - line_start_offset - line_ending_length;
-		} else if (body_start > 0) {
-			// If this is the last header and there is a message body, use the start of message body and the start of this header to calculate line  length
-			line_length = body_start - line_start_offset - line_ending_length - line_ending_length;
-		}
-		//printf("  Line length: %d bytes\n", line_length);
-		field_body_offset = line_start_offset + header_name_lengths[header_index];
-		//printf("  field-body offset: %d bytes\n", field_body_offset);
-		field_body_length = line_length - header_name_lengths[header_index];
-		//printf("  field-body length: %d bytes\n", field_body_length);
-
-		printf("  Parsing field-body...\n");
-		unfold_field_body(&file_in_memory[field_body_offset], field_body_length, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
 
 		printf("    Content-Type = '%s'\n", unfolded_field_body_chars);
 		printf("      Unfolded body length: %d\n", unfolded_field_body_length);
@@ -662,6 +799,8 @@ int main(int argc, char* argv[])
 						}
 					}
 					printf("\n\n  Info: Indexing specific headers...\n");
+					int part_header_mime_version[MAX_IDENTICAL_HEADER_COUNT] = { 0 };
+					int part_header_mime_version_count = 0;
 					int part_header_content_type[MAX_IDENTICAL_HEADER_COUNT] = { 0 };
 					int part_header_content_type_count = 0;
 					int part_header_content_transfer_encoding[MAX_IDENTICAL_HEADER_COUNT] = { 0 };
@@ -675,7 +814,12 @@ int main(int argc, char* argv[])
 						memcpy(header_name_chars, &file_in_memory[line_start_offsets[i]], header_name_len);
 						header_name_chars[header_name_len + 0] = ':';
 						header_name_chars[header_name_len + 1] = '\0';
-						if (strcasecmp("content-type:", header_name_chars) == 0) {
+
+						if (strcasecmp("mime-version:", header_name_chars) == 0) {
+							part_header_mime_version[part_header_mime_version_count] = i;
+							part_header_mime_version_count++;
+							printf("    'mime-version' header at index %d\n", i);
+						} else if (strcasecmp("content-type:", header_name_chars) == 0) {
 							part_header_content_type[part_header_content_type_count] = i;
 							part_header_content_type_count++;
 							printf("    'content-type' header at index %d\n", i);
@@ -694,129 +838,16 @@ int main(int argc, char* argv[])
 					}
 	if (part_header_content_transfer_encoding_count == 1) {
 		int header_index = part_header_content_transfer_encoding[0];
-		printf("\nValidating Content-Transfer-Encoding header (does not support comments)...\n");
-		line_start_offset = line_start_offsets[header_index];
-		line_length = -1;
-		if (header_index + 1 < header_count) {
-			/* If there are subsequent headers, use the start of the next header and the start of this header to calculate line length */
-			line_length = line_start_offsets[header_index + 1] - line_start_offset - line_ending_length;
-		} else {
-			/* If this is the last header, use the start of the part body and the start of this header to calculate line length */
-			line_length = double_line_ending - &file_in_memory[line_start_offset];
-		}
-		//printf("  Line length: %d bytes\n", line_length);
-		field_body_offset = line_start_offset + header_name_lengths[header_index];
-		//printf("  field-body offset: %d bytes\n", field_body_offset);
-		field_body_length = line_length - header_name_lengths[header_index];
-		//printf("  field-body length: %d bytes\n", field_body_length);
-
-		printf("  Parsing field-body...\n");
-		unfold_field_body(&file_in_memory[field_body_offset], field_body_length, &unfolded_field_body_chars[0], &unfolded_field_body_length);
-
-		int is_base64 = 0;
-		int is_quoted_printable = 0;
-		printf("    Content-Transfer-Encoding = '%s'\n", unfolded_field_body_chars);
-		printf("      unfolded_field_body_length: %d\n", unfolded_field_body_length);
-		int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
 		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
-		unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
-		int raw_encoded_length = 0;
-		int pos = 0;
-		if (unfolded_field_body_length == 16 && strncmp("quoted-printable", unfolded_field_body_chars, 16) == 0) {
-			is_quoted_printable = 1;
-			printf("  Content-Transfer-Encoding validated as quoted-printable.\n");
-			unsigned char soft_line_ending[line_ending_length + 2];
-			soft_line_ending[0] = '=';
-			memcpy(&soft_line_ending[1], line_ending, line_ending_length);
-			for (raw_encoded_length = 0, pos = 0; pos < content_length; pos++) {
-				unsigned char c = first_byte[pos];
-				if (c != '=') {
-					memcpy(&encoded_bytes[raw_encoded_length], first_byte + pos, 1);
-					raw_encoded_length++;
-				} else if (strncmp(soft_line_ending, &first_byte[pos], line_ending_length + 1) == 0) {
-					pos += line_ending_length;
-				} else {
-					unsigned char encoded_char[3] = { first_byte[pos+1], first_byte[pos+2], '\0' };
-					int decoded_char_numeric = (int)strtol(encoded_char, NULL, 16);
-					unsigned char decoded_char;
-					sprintf(&decoded_char, "%c", decoded_char_numeric);
-					memcpy(&encoded_bytes[raw_encoded_length], &decoded_char, 1);
-					raw_encoded_length++;
-					pos += 2;
-				}
-//				if (c != '\n' && c != '\r') {
-//					memcpy(&encoded_bytes[raw_encoded_length], first_byte + pos, 1);
-//					raw_encoded_length++;
-//				}
-			}
-			printf("    Detected Content-Length: %d bytes\n", content_length);
-			printf("    Decoded content length: %d bytes\n", raw_encoded_length);
-				unsigned char* sha1_digest = sha1_hash(encoded_bytes, raw_encoded_length);
-				printf("    SHA-1 Hash: %s\n", sha1_digest);
-				// Try to open the file
-				errno = 0;
-				unsigned char output_path[2048];
-				sprintf(output_path, "/tmp/%s", sha1_digest);
-				free(sha1_digest);
-				FILE *fd_decoded = fopen(output_path, "w");
-				if (fd_decoded == NULL) {
-					perror("open() error: ");
-				} else {
-					size_t bytes_written = fwrite(encoded_bytes, 1, raw_encoded_length, fd_decoded);
-					if (bytes_written != raw_encoded_length) {
-						fprintf(stderr, "File write byte length mismatch: %d written, %d expected\n", bytes_written, raw_encoded_length);
-					} else {
-						printf("  Extracted file to %s\n", output_path);
-					}
-					fclose(fd_decoded);
-				}
+		body_start = first_byte - file_in_memory;
+		printf("Validating Content-Transfer-Encoding header (does not support comments)...\n");
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
 
-			free(encoded_bytes);
-		} else if (unfolded_field_body_length == 6 && strncmp("base64", unfolded_field_body_chars, 6) == 0) {
-			is_base64 = 1;
-			printf("  Content-Transfer-Encoding validated as base64.\n");
-			printf("  Extracting binary file...\n");
-			printf("    current_part = %d, boundary_count = %d, next_offset = %p, termination = %p, double_line_ending = %p\n", current_part, boundary_count, &file_in_memory[boundary_offsets[current_part + 1]], &file_in_memory[boundary_terminator], double_line_ending);
-//			int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
-//			unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
-//			unsigned char* encoded_bytes = calloc(content_length + 1, sizeof(char));
-//			int raw_base64_length = 0;
-//			int pos = 0;
-			for (raw_encoded_length = 0, pos = 0; pos < content_length; pos++) {
-				unsigned char c = first_byte[pos];
-				if (c != '\n' && c != '\r') {
-					memcpy(&encoded_bytes[raw_encoded_length], first_byte + pos, 1);
-					raw_encoded_length++;
-				}
-			}
-			printf("    Detected Content-Length: %d bytes (%d bytes without line endings)\n", content_length, raw_encoded_length);
-			int *output_length = calloc(1, sizeof(int));
-			unsigned char* decoded_bytes = base64_decode(encoded_bytes, raw_encoded_length, output_length);
-			if (decoded_bytes != NULL) {
-				printf("    Decoded content length: %d bytes\n", *output_length);
-				unsigned char* sha1_digest = sha1_hash(decoded_bytes, *output_length);
-				printf("    SHA-1 Hash: %s\n", sha1_digest);
-				// Try to open the file
-				errno = 0;
-				unsigned char base64_output_path[2048];
-				sprintf(base64_output_path, "/tmp/%s", sha1_digest);
-				free(sha1_digest);
-				FILE *fd_base64 = fopen(base64_output_path, "w");
-				if (fd_base64 == NULL) {
-					perror("open() error: ");
-				} else {
-					size_t bytes_written = fwrite(decoded_bytes, 1, *output_length, fd_base64);
-					if (bytes_written != *output_length) {
-						fprintf(stderr, "File write byte length mismatch: %d written, %d expected\n", bytes_written, output_length);
-					} else {
-						printf("  Extracted file to %s\n", base64_output_path);
-					}
-					fclose(fd_base64);
-				}
-				free(decoded_bytes);
-			}
-		}
+		int content_length = current_part + 1 < boundary_count ? &file_in_memory[boundary_offsets[current_part + 1]] - double_line_ending - line_ending_length - line_ending_length : &file_in_memory[boundary_terminator] - double_line_ending - line_ending_length - line_ending_length;
+
+		content_transfer_encoding_decode(&first_byte[0], content_length, line_ending, line_ending_length, unfolded_field_body_chars, unfolded_field_body_length);
 	}
+
 
 				}
 			}
