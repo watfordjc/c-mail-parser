@@ -281,53 +281,7 @@ void content_transfer_encoding_decode(unsigned char *first_byte, int content_len
 	free(encoded_bytes);
 }
 
-/*
-The following exit values are defined:
-
-0: normal exit
-1: generic error
-2: command-line argument(s) provided are not valid
-3: I/O error
-
-*/
-
-int main(int argc, char* argv[])
-{
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <path/to/email/message>\n", argv[0]);
-		exit(2);
-	}
-
-	/* Try to open the file */
-	errno = 0;
-	int fd = open(argv[1], O_RDONLY, S_IRUSR);
-	if (fd == -1) {
-		perror("open() error: ");
-		exit(3);
-	}
-
-	/* Get file size */
-	struct stat sb;
-	errno = 0;
-	if (fstat(fd, &sb) == -1) {
-		perror("fstat() error: ");
-		exit(3);
-	}
-	printf("Info: File size is %ld bytes\n", sb.st_size);
-
-	/* Map file in memory */
-	unsigned char *file_in_memory = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	if (file_in_memory == MAP_FAILED) {
-		perror("mmap() error: ");
-	}
-
-	/* Separate above output from below output */
-	printf("\n");
-
-	/* TODO: Parsing needs to be recursive so that e-mails within e-mails are parsed properly */
-	/* This is probably the start of where an RFC.822 message should be parsed */
-	/* TODO: Deal with MIME part recursion first, to work out what needs passing/returning from MIME type functions */
-
+void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb) {
 	unsigned char line_ending[MAX_LINE_ENDING_LENGTH + 1];
 	int line_ending_length = 0;
 	int message_body_found = 0;
@@ -843,6 +797,18 @@ int main(int argc, char* argv[])
 						}
 						bzero(header_name_chars, (MAX_HEADER_NAME_LENGTH + 1) * sizeof(char));
 					}
+					printf("\n");
+
+	if (part_header_content_type_count == 1) {
+		int header_index = part_header_content_type[0];
+		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
+		body_start = first_byte - file_in_memory;
+		printf("Validating Content-Type header (does not support comments)...\n");
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+		/* TODO: Parse type and name */
+		printf("  Content-Type: %s\n\n", unfolded_field_body_chars);
+	}
+
 	if (part_header_content_transfer_encoding_count == 1) {
 		int header_index = part_header_content_transfer_encoding[0];
 		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
@@ -926,6 +892,56 @@ int main(int argc, char* argv[])
 	// } else {
 	//      printf("Info: MIME-Version header value is: ");
 	// }
+}
+
+/*
+The following exit values are defined:
+
+0: normal exit
+1: generic error
+2: command-line argument(s) provided are not valid
+3: I/O error
+
+*/
+
+int main(int argc, char* argv[])
+{
+	if (argc < 2) {
+		fprintf(stderr, "Usage: %s <path/to/email/message>\n", argv[0]);
+		exit(2);
+	}
+
+	/* Try to open the file */
+	errno = 0;
+	int fd = open(argv[1], O_RDONLY, S_IRUSR);
+	if (fd == -1) {
+		perror("open() error: ");
+		exit(3);
+	}
+
+	/* Get file size */
+	struct stat sb;
+	errno = 0;
+	if (fstat(fd, &sb) == -1) {
+		perror("fstat() error: ");
+		exit(3);
+	}
+	printf("Info: File size is %ld bytes\n", sb.st_size);
+
+	/* Map file in memory */
+	unsigned char *file_in_memory = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (file_in_memory == MAP_FAILED) {
+		perror("mmap() error: ");
+	}
+
+	/* Separate above output from below output */
+	printf("\n");
+
+	/* TODO: Parsing needs to be recursive so that e-mails within e-mails are parsed properly */
+	/* This is probably the start of where an RFC.822 message should be parsed */
+	/* TODO: Deal with MIME part recursion first, to work out what needs passing/returning from MIME type functions */
+
+	parse_rfc822_message(file_in_memory, sb);
 
 	// Unmap the file from memory
 	errno = 0;
