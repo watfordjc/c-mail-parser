@@ -527,6 +527,13 @@ int main(int argc, char* argv[])
 	int unfolded_field_body_length = 0;
 	int is_mime_v1 = -1;
 
+	if (header_message_id_count == 1) {
+		int header_index = header_message_id[0];
+		printf("\nValidating Message-ID header (does not support comments)...\n");
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+		printf("  Message-ID = '%s'\n", unfolded_field_body_chars);
+	}
+
 	if (header_mime_version_count == 1) {
 		int header_index = header_mime_version[0];
 		printf("\nValidating MIME-Version header (does not support comments)...\n");
