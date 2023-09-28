@@ -11,20 +11,24 @@ Later versions may rely on a library to handle some of the parsing.
 - [x] ```mmap``` (as read-only) the file specified in a command-line argument.
 - [x] Index the line-endings of headers and where the message body (if any) begins.
 - [x] Print the header names.
-- [ ] Parse the MIME-Version header.
+- [x] Parse the MIME-Version header.
 - [x] Parse the Content-Type header.
 - [ ] Print the body if there is no Content-Type header.
 - [x] Print the body if ```Content-Type: text/plain```.
-- [ ] Parse the first level of ```Content-Type: multipart/alternative``` and index the boundary delimiters.
+- [x] Parse the first level of ```Content-Type: multipart/alternative``` and index the boundary delimiters.
 - [ ] Parse nested levels of multipart MIME message bodies.
+- [ ] Integrity check the message body if a DKIM-Signature is present (normalise and hash the message body, compare to `b=` in `DKIM-Signature` headers).
 
 ## Compiling
 
 The current source code should compile with gcc if the necessary C libraries are available:
 
 ```bash
-gcc c-mail-parser.c -o mail-parser
+gcc c-mail-parser.c -o mail-parser -lssl -lcrypto
 ```
+
+Required libraries:
+* OpenSSL (libssl-dev)
 
 ## Usage
 
