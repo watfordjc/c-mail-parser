@@ -247,6 +247,108 @@ unsigned char* sha1_hash(const char *data, int length) {
 	return digest_hex;
 }
 
+unsigned char* normalise_line_endings(unsigned char *first_byte, int content_length, unsigned char* line_ending, int line_ending_length, int* rfc822_content_length)
+{
+	/* RFC 822 uses \r\n for line endings */
+	unsigned char rfc822_line_ending[3] = { '\r', '\n', '\0' };
+	int rfc822_line_ending_length = strlen(rfc822_line_ending);
+	/* If the input already uses the correct line endings, return the input */
+	if ((rfc822_line_ending_length == line_ending_length) && (strncmp(rfc822_line_ending, line_ending, line_ending_length) == 0)) {
+		*rfc822_content_length = content_length;
+		return first_byte;
+	}
+
+	*rfc822_content_length = 0;
+	unsigned int LINE_ARRAY_SIZE = MAX_MULTILINE_HEADER_LINES;
+	unsigned int line_ending_count = 0;
+	unsigned char** line_endings = calloc(LINE_ARRAY_SIZE, sizeof(int));
+	if (line_endings == NULL) {
+		return NULL;
+	}
+	printf("\n  LINE_ARRAY_SIZE = %d", LINE_ARRAY_SIZE);
+	unsigned char* next_line_ending = NULL;
+	int position = 0;
+
+	/* Get the position of all line endings */
+	for (position = 0; position < content_length; position += line_ending_length)
+	{
+		/* Find the next line ending */
+		next_line_ending = memmem(&first_byte[position], content_length - position, line_ending, line_ending_length);
+		/* If there isn't a next line ending, exit for loop */
+		if (next_line_ending == NULL) {
+			continue;
+		}
+		/* Add line ending to array */
+		line_endings[line_ending_count] = next_line_ending;
+		/* Increase line ending count */
+		line_ending_count++;
+		/* Calculate position in file */
+		position += next_line_ending - &first_byte[position];
+		/* If the line ending array is not big enough for the next for loop iteration, double the size of the array */
+		if ((line_ending_count + 1) == LINE_ARRAY_SIZE) {
+			/* Attempt to double the size of the array */
+			unsigned char** expanded_line_endings = reallocarray(line_endings, LINE_ARRAY_SIZE * 2, sizeof(int));
+			/* If not possible, print an error and return from the function with no data (assume failure) */
+			if (expanded_line_endings == NULL) {
+				perror("reallocarray():");
+				free(line_endings);
+				*rfc822_content_length = 0;
+				return NULL;
+			}
+			/* Otherwise, switch to the new array */
+			LINE_ARRAY_SIZE *= 2;
+			printf("\n  LINE_ARRAY_SIZE = %d", LINE_ARRAY_SIZE);
+			line_endings = expanded_line_endings;
+		}
+	}
+
+	*rfc822_content_length = content_length - (line_ending_length * line_ending_count) + (rfc822_line_ending_length * line_ending_count);
+	char* rfc822_content = calloc(*rfc822_content_length + 1, sizeof(char));
+	int rfc822_position = 0;
+	int current_line = 0;
+	size_t current_line_length = 0;
+
+	/* Iterate over lines, copying each line and replacing the line ending with \r\n */
+	for (current_line = 0, position = 0, rfc822_position = 0; current_line < line_ending_count; current_line++) {
+		/* Recall the next line_ending */
+		next_line_ending = line_endings[current_line];
+		/* Calculate length of line */
+		current_line_length = next_line_ending - &first_byte[position];
+		/* Copy current line, exluding line_ending */
+		memcpy(&rfc822_content[rfc822_position], &first_byte[position], current_line_length);
+		/* Increase rfc822_position by bytes copied */
+		rfc822_position += current_line_length;
+		/* Increase position by bytes copied */
+		position += current_line_length;
+		/* Copy RFC822 line ending */
+		memcpy(&rfc822_content[rfc822_position], rfc822_line_ending, rfc822_line_ending_length);
+		/* Increase position by line_ending length */
+		position += line_ending_length;
+		/* Increase rfc822_position by rfc822_line_ending_length */
+		rfc822_position += rfc822_line_ending_length;
+	}
+
+	/* If position is less than content_length, there are bytes after the final line ending in the file */
+	if (position < content_length) {
+		/* Calculate length of line */
+		current_line_length = content_length - position;
+		/* Copy remaining bytes of file */
+		memcpy(&rfc822_content[rfc822_position], &first_byte[position], current_line_length);
+		/* Increase rfc822_position by bytes copied */
+		rfc822_position += current_line_length;
+		/* Increase position by bytes copied */
+		position += current_line_length;
+	}
+
+	/* Print the new length of the file, warning if the length doesn't match the expected length */
+	if (rfc822_position != *rfc822_content_length) {
+		fprintf(stderr, "Length mismatch. rfc822_position=%d, rfc822_content_length=%d\n", rfc822_position, *rfc822_content_length);
+	} else {
+		printf("\n  RFC822-formatted content length: %d\n", *rfc822_content_length);
+	}
+	return rfc822_content;
+}
+
 void content_transfer_encoding_decode(unsigned char *first_byte, int content_length, unsigned char* line_ending, int line_ending_length, unsigned char *content_transfer_encoding, int content_transfer_encoding_length)
 {
 	int is_base64 = 0;
@@ -313,15 +415,15 @@ void parse_content_type(unsigned char *first_byte, int content_length, unsigned 
 	unsigned char* next_quote = NULL;
 	unsigned char* next_semicolon = NULL;
 	for (int i = 0; i < content_type_header_body_length; i++) {
-		printf("      Current position: %p\n", content_type_header_body + i);
+//		printf("      Current position: %p\n", content_type_header_body + i);
 		// memmem(&file_in_memory[position], sb.st_size - position, "\r", 1);
 		next_quote = memmem(&content_type_header_body[i], content_type_header_body_length - i, "\"", 1);
 		next_semicolon = memmem(&content_type_header_body[i], content_type_header_body_length - i, ";", 1);
 		if (next_quote != NULL && next_semicolon != NULL && next_quote < next_semicolon) {
-			printf("    Double-quote found at: %p (offset %d), skipping over\n", next_quote, (int)(next_quote - content_type_header_body));
+//			printf("    Double-quote found at: %p (offset %d), skipping over\n", next_quote, (int)(next_quote - content_type_header_body));
 			next_quote = memmem(&next_quote[1], content_type_header_body_length - (int)(next_quote - content_type_header_body) , "\"", 1);
 			if (next_quote != NULL) {
-				printf("    Double-quote found at: %p (offset %d)\n", next_quote, (int)(next_quote - content_type_header_body));
+//				printf("    Double-quote found at: %p (offset %d)\n", next_quote, (int)(next_quote - content_type_header_body));
 				i = (int)(next_quote - content_type_header_body);
 				continue;
 			} else {
@@ -329,7 +431,7 @@ void parse_content_type(unsigned char *first_byte, int content_length, unsigned 
 			}
 		}
 		if (next_semicolon != NULL) {
-			printf("        Semi-colon found at: %p (offset %d)\n", next_semicolon, (int)(next_semicolon - content_type_header_body));
+//			printf("        Semi-colon found at: %p (offset %d)\n", next_semicolon, (int)(next_semicolon - content_type_header_body));
 			semicolon_offsets[semicolon_count] = (int)(next_semicolon - content_type_header_body);
 			semicolon_count++;
 			i = (int)(next_semicolon - content_type_header_body);
@@ -372,7 +474,7 @@ void parse_content_type(unsigned char *first_byte, int content_length, unsigned 
 		mime_parameter_len = i + 1 < semicolon_count ? semicolon_offsets[i + 1] - semicolon_offsets[i] - 1 : content_type_header_body_length - semicolon_offsets[i] - 1;
 		printf("      Parameter length: %d\n", mime_parameter_len);
 		unsigned char* next_equals = memmem(&content_type_header_body[semicolon_offsets[i] + 1], mime_parameter_len, "=", 1);
-		printf ("        Equals found at %p (offset %d)\n", next_equals, (int)(next_equals - content_type_header_body) - semicolon_offsets[i]);
+//		printf ("        Equals found at %p (offset %d)\n", next_equals, (int)(next_equals - content_type_header_body) - semicolon_offsets[i]);
 		if (next_equals != NULL) {
 			size_t mime_param_name_len = (int)(next_equals - content_type_header_body) - semicolon_offsets[i] - 1;
 			memcpy(mime_param_name, &content_type_header_body[semicolon_offsets[i] + 1], mime_param_name_len);
@@ -407,7 +509,7 @@ void parse_content_type(unsigned char *first_byte, int content_length, unsigned 
 	}
 }
 
-void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
+void parse_rfc822_message(unsigned char* file_in_memory, unsigned int file_size)
 {
 	unsigned char line_ending[MAX_LINE_ENDING_LENGTH + 1];
 	int line_ending_length = 0;
@@ -429,11 +531,11 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 	/* Current position in file */
 	int position = 0;
 	/* Find next CR character */
-	unsigned char* next_cr = memmem(&file_in_memory[position], sb.st_size - position, "\r", 1);
+	unsigned char* next_cr = memmem(&file_in_memory[position], file_size - position, "\r", 1);
 	/* Store offset of next CR character, or -1 if none */
 	int next_cr_offset = next_cr == NULL ? -1 : (int)(next_cr - &file_in_memory[0]);
 	/* Find next LF character */
-	unsigned char* next_lf = memmem(&file_in_memory[position], sb.st_size - position, "\n", 1);
+	unsigned char* next_lf = memmem(&file_in_memory[position], file_size - position, "\n", 1);
 	/* Store offset of next LF character, or -1 if none */
 	int next_lf_offset = next_lf == NULL ? -1 : (int)(next_lf - &file_in_memory[0]);
 
@@ -461,12 +563,12 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 	unsigned char double_line_ending_chars[MAX_LINE_ENDING_LENGTH * 2 + 1];
 	strcpy(double_line_ending_chars, line_ending);
 	strcat(double_line_ending_chars, line_ending);
-	unsigned char* double_line_ending = memmem(&file_in_memory[position], sb.st_size - position, double_line_ending_chars, strlen(double_line_ending_chars));
+	unsigned char* double_line_ending = memmem(&file_in_memory[position], file_size - position, double_line_ending_chars, strlen(double_line_ending_chars));
 	body_start = double_line_ending == NULL ? -1 : (int)(double_line_ending - &file_in_memory[0]) + strlen(double_line_ending_chars);
 	printf("Info: Message body starts at position %d\n", body_start);
 	printf("\n");
 
-	int headers_last_byte = body_start == -1 ? sb.st_size : body_start;
+	int headers_last_byte = body_start == -1 ? file_size : body_start;
 	unsigned char* next_line_ending = NULL;
 	unsigned char* header_name_ending = NULL;
 	unsigned char header_name_chars[MAX_HEADER_NAME_LENGTH + 1] = { 0 };
@@ -502,6 +604,41 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 			position = (int)(next_line_ending - &file_in_memory[0]);
 		}
 	}
+
+	if (strcmp(line_ending, "\r\n") != 0) {
+		printf("\n\n----------\n*** Attempting to format as RFC 822... ***");
+		unsigned int rfc822_content_length = 0;
+		unsigned char* rfc822_content = normalise_line_endings(&file_in_memory[0], file_size, line_ending, line_ending_length, &rfc822_content_length);
+		if (rfc822_content_length > 0 && &rfc822_content[0] != &file_in_memory[0]) {
+			/* Save content with \r\n line endings to file */
+			/* TODO: Add option to enable/disable this functionality */
+/*
+			if (1 == 1) {
+				unsigned char* rfc822_sha1 = sha1_hash(rfc822_content, rfc822_content_length);
+				printf("  RFC822 SHA-1 Hash: %s\n", rfc822_sha1);
+				unsigned char output_path[2048];
+				sprintf(output_path, "/tmp/%s", rfc822_sha1);
+				free(rfc822_sha1);
+				FILE *fd_rfc822_content = fopen(output_path, "w");
+				if (fd_rfc822_content == NULL) {
+					perror("fopen() error: ");
+				} else {
+					size_t bytes_written = fwrite(rfc822_content, 1, rfc822_content_length, fd_rfc822_content);
+					if (bytes_written != rfc822_content_length) {
+						fprintf(stderr, "File write byte length mismatch: %d written, %d expected\n", bytes_written, rfc822_content_length);
+					} else {
+						printf("    Extracted file to %s\n", output_path);
+					}
+					fclose(fd_rfc822_content);
+				}
+			}
+*/
+			printf("*** Switching to RFC822-formatted line endings ***\n----------\n\n");
+			parse_rfc822_message(rfc822_content, rfc822_content_length);
+			return;
+		}
+	}
+
 
 	printf("\nInfo: Current position: %d\n", position);
 
@@ -633,7 +770,7 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
 
 		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
-		int content_length = sb.st_size - body_start;
+		int content_length = file_size - body_start;
 //		printf("content_length = %d\n", content_length);
 //		printf("field_body = %s\n", unfolded_field_body_chars);
 
@@ -646,7 +783,7 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
 
 		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
-		int content_length = sb.st_size - body_start;
+		int content_length = file_size - body_start;
 		struct content_type contentType;
 		parse_content_type(&first_byte[0], content_length, line_ending, line_ending_length, unfolded_field_body_chars, unfolded_field_body_length, &contentType);
 
@@ -681,7 +818,7 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 			if (print_body == 1) {
 				printf("  Printing message body to stdout...\n");
 				printf("----------\n");
-				for (int i = body_start; i < sb.st_size; i++)
+				for (int i = body_start; i < file_size; i++)
 				{
 					char c = file_in_memory[i];
 					printf("%c", file_in_memory[i]);
@@ -714,15 +851,15 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 				int boundary_delim_end_chars_len = strlen(boundary_delim_end_chars);
 //			     printf("Boundary length: %d\n", boundary_delim_chars_len);
 				unsigned char* next_line_separator = NULL;
-				int current_line_length = 0;
-				for (boundary_count = 0, position = body_start; position < sb.st_size; position++)
+				unsigned int current_line_length = 0;
+				for (boundary_count = 0, position = body_start; position < file_size; position += line_ending_length)
 				{
 					/* Search for the next line separator (which all boundary delimiters start with) - faster than searching for next delimiter */
-					next_line_separator = memmem(&file_in_memory[position], sb.st_size - position, line_ending, line_ending_length);
+					next_line_separator = memmem(&file_in_memory[position], file_size - position, line_ending, line_ending_length);
 					/* If there are more line separators, there might be more boundary delimiters */
 					if (next_line_separator != NULL) {
 						/* Calculate the length of the current line */
-						current_line_length = (int)(next_line_separator - file_in_memory - position);
+						current_line_length = next_line_separator - &file_in_memory[position];
 /*
 						if (current_line_length != 76) {
 							printf("%d ", current_line_length);
@@ -739,7 +876,7 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 //						     int comparitor = memcmp(&file_in_memory[position], boundary_delim_chars, boundary_delim_chars_len);
 //						     printf("%d\n", comparitor);
 							if (memcmp(&file_in_memory[position], boundary_delim_chars, boundary_delim_chars_len) == 0) {
-								next_boundary = file_in_memory + position;
+								next_boundary = &file_in_memory[position];
 								boundary_offsets[boundary_count] = position;
 								printf("%6d ", position);
 								boundary_count++;
@@ -765,21 +902,25 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 				for (current_part = 0; current_part < boundary_count; current_part++) {
 					printf("\nParsing part #%d...\n", current_part);
 					position = boundary_offsets[current_part] + boundary_delim_chars_len + line_ending_length;
-					unsigned char* double_line_ending = memmem(&file_in_memory[position], sb.st_size - position, double_line_ending_chars, strlen(double_line_ending_chars));
+					unsigned char* double_line_ending = memmem(&file_in_memory[position], file_size - position, double_line_ending_chars, strlen(double_line_ending_chars));
 					int header_length = double_line_ending - &file_in_memory[position];
 
 					printf("--\n%.*s\n--\n", header_length, &file_in_memory[position]);
 					printf("  Info: Content for part #%d starts at position %d\n", current_part, double_line_ending - file_in_memory + strlen(double_line_ending_chars));
 					printf("  Info: Indexing byte offsets of header lines...\n  ");
-					for (header_count = 0; position < double_line_ending - file_in_memory; position++)
+					int header_start_position = position;
+					int header_position = 0;
+					header_count = 0;
+					for (header_position = 0; header_position < header_length; header_position += line_ending_length)
 					{
-						next_line_ending = memmem(&file_in_memory[position], header_length - position, line_ending, line_ending_length);
+						position = header_start_position + header_position;
+						next_line_ending = memmem(&file_in_memory[position], header_length - header_position, line_ending, line_ending_length);
 						if (next_line_ending == NULL) {
 							next_line_ending = double_line_ending;
 						}
 						if (valid_header_character(file_in_memory[position])) {
 							line_start_offsets[header_count] = position;
-							header_name_ending = memmem(&file_in_memory[position], header_length - position, ":", 1);
+							header_name_ending = memmem(&file_in_memory[position], header_length - header_position, ":", 1);
 							//printf("header_name_ending: %p\n", &header_name_ending);
 							if (next_line_ending == NULL || header_name_ending == NULL) {
 								fprintf(stderr, "\nWarning: Line starting at byte %d does not contain both a colon and a line ending\n");
@@ -798,7 +939,7 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 							}
 						}
 						if (next_line_ending != NULL) {
-							position = (int)(next_line_ending - &file_in_memory[0]);
+							header_position = next_line_ending - &file_in_memory[header_start_position];
 						}
 					}
 					printf("\n\n  Info: Indexing specific headers...\n");
@@ -865,6 +1006,20 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 
 		content_transfer_encoding_decode(&first_byte[0], content_length, line_ending, line_ending_length, unfolded_field_body_chars, unfolded_field_body_length);
 		printf("\n");
+
+
+/*		int header_index = header_content_transfer_encoding[0];
+		printf("\nValidating Content-Transfer-Encoding header (does not support comments)...\n");
+		parse_header(&file_in_memory[0], &line_start_offsets[0], &header_name_lengths[0], line_ending_length, header_count, body_start, header_index, &unfolded_field_body_chars[0], &unfolded_field_body_length);
+
+		unsigned char* first_byte = double_line_ending + line_ending_length + line_ending_length;
+		int content_length = file_size - body_start;
+
+//		printf("content_length = %d\n", content_length);
+//		printf("field_body = %s\n", unfolded_field_body_chars);
+
+		content_transfer_encoding_decode(&first_byte[0], content_length, line_ending, line_ending_length, unfolded_field_body_chars, unfolded_field_body_length);
+*/
 	}
 
 
@@ -892,7 +1047,7 @@ void parse_rfc822_message(unsigned char* file_in_memory, struct stat sb)
 	//	      // If content-type is text/plain, print to stdout
 	//	      // TODO: Handle different character sets
 	//	      printf("text/plain detected, printing message body to stdout...\n\n");
-	//	      for (int i = body_start; i < sb.st_size; i++)
+	//	      for (int i = body_start; i < file_size; i++)
 	//	      {
 	//		      c = file_in_memory[i];
 	//		      printf("%c", file_in_memory[i]);
@@ -979,7 +1134,8 @@ int main(int argc, char* argv[])
 	/* This is probably the start of where an RFC.822 message should be parsed */
 	/* TODO: Deal with MIME part recursion first, to work out what needs passing/returning from MIME type functions */
 
-	parse_rfc822_message(file_in_memory, sb);
+	unsigned int file_size = sb.st_size;
+	parse_rfc822_message(file_in_memory, file_size);
 
 	// Unmap the file from memory
 	errno = 0;
